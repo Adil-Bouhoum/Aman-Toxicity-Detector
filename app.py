@@ -187,7 +187,7 @@ if page == 'Analyse':
     if not teacher.loaded and len(model_options) == 1:
         st.info(
             '⏳ **XLM-R Teacher** sera disponible après l\'entraînement. '
-            'Exécute `AMANE_Teacher.ipynb` puis place les fichiers dans `models/teacher/`.',
+            'On exécute `AMANE_Teacher.ipynb` puis on place les fichiers dans `models/teacher/`.',
             icon='ℹ️'
         )
 
