@@ -4,6 +4,16 @@ import joblib
 import numpy as np
 from utils import clean_text, LABEL_COLS
 
+# torch et transformers sont optionnels — uniquement requis pour le Teacher XLM-R
+try:
+    import torch
+    import torch.nn as nn
+    from transformers import AutoTokenizer, AutoModel
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+
 # ── Chemins modèles ──────────────────────────────────────────────────────────
 BENCHMARK_MODEL_PATH  = 'models/ovr_balanced.joblib'
 BENCHMARK_TFIDF_PATH  = 'models/tfidf_vectorizer.joblib'
