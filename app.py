@@ -1,12 +1,49 @@
 import json
+import requests
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from predictor import load_benchmark, load_teacher, load_teacher_star, load_student
 from utils import LABEL_COLS, LABEL_META, toxicity_level
+
+API_URL = st.secrets.get("API_URL", "https://bhm03-amane-api.hf.space")
+
+
+class APIPredictor:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        self.loaded     = False
+        self.error      = None
+
+    def predict(self, text: str) -> dict:
+        resp = requests.post(
+            f"{API_URL}/predict",
+            json={"text": text, "model": self.model_name},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def predict_batch(self, texts: list) -> list:
+        resp = requests.post(
+            f"{API_URL}/predict_batch",
+            json={"texts": texts, "model": self.model_name},
+            timeout=300,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_api_status() -> dict:
+    try:
+        resp = requests.get(f"{API_URL}/health", timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return {}
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -67,27 +104,23 @@ PRESETS = {
     'FR — Neutre':  'Bonjour, comment allez-vous? Bonne journée à tous.',
 }
 
-# ── Chargement des modèles (cached) ──────────────────────────────────────────
-@st.cache_resource(show_spinner='Chargement du Benchmark...')
-def get_benchmark():
-    return load_benchmark()
+# ── Statut API + initialisation des predictors ───────────────────────────────
+benchmark    = APIPredictor('benchmark')
+teacher      = APIPredictor('teacher')
+teacher_star = APIPredictor('teacher_star')
+student      = APIPredictor('student')
 
-@st.cache_resource(show_spinner='Chargement du Teacher XLM-R...')
-def get_teacher():
-    return load_teacher()
-
-@st.cache_resource(show_spinner='Chargement du Teacher* (Darija)...')
-def get_teacher_star():
-    return load_teacher_star()
-
-@st.cache_resource(show_spinner='Chargement du Student DistilBERT...')
-def get_student():
-    return load_student()
-
-benchmark    = get_benchmark()
-teacher      = get_teacher()
-teacher_star = get_teacher_star()
-student      = get_student()
+_status = get_api_status()
+_api_online = bool(_status)
+for _predictor, _key in [
+    (benchmark,    'benchmark'),
+    (teacher,      'teacher'),
+    (teacher_star, 'teacher_star'),
+    (student,      'student'),
+]:
+    _info = _status.get(_key, {})
+    _predictor.loaded = _info.get('loaded', False)
+    _predictor.error  = _info.get('error')
 
 MODELS = {
     'Benchmark (OVR LogReg)':      benchmark,
@@ -109,6 +142,8 @@ with st.sidebar:
     )
 
     st.divider()
+    if not _api_online:
+        st.warning('API en démarrage — patientez quelques secondes puis rechargez.', icon='⏳')
     st.markdown('**Statut des modèles**')
     for key, predictor in MODELS.items():
         info = MODEL_INFO[key]
