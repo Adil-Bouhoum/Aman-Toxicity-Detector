@@ -4,8 +4,9 @@ numpy>=1.24.0
 scikit-learn>=1.3.0
 joblib>=1.3.0
 plotly>=5.18.0
- 
-# torch et transformers à décommenter UNIQUEMENT quand le Teacher XLM-R est intégré
-# torch>=2.0.0
-# transformers>=4.38.0
- 
+
+# HuggingFace — modèles + téléchargement depuis HF Hub
+torch>=2.0.0
+transformers>=4.38.0
+sentencepiece>=0.1.99
+huggingface_hub>=0.22.0

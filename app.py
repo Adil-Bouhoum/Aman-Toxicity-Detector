@@ -1,13 +1,14 @@
+import json
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import io
+from plotly.subplots import make_subplots
 
-from predictor import load_benchmark, load_teacher
+from predictor import load_benchmark, load_teacher, load_teacher_star, load_student
 from utils import LABEL_COLS, LABEL_META, toxicity_level
 
-# ── Config page ──────────────────────────────────────────────────────────────
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title='AMANE — Détection de toxicité',
     page_icon='🛡️',
@@ -15,18 +16,15 @@ st.set_page_config(
     initial_sidebar_state='expanded',
 )
 
-# ── CSS global ───────────────────────────────────────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 .block-container { padding-top: 1.5rem; }
 .stTextArea textarea { font-size: 14px; }
 .label-fr { font-size: 13px; font-weight: 500; }
 .model-badge {
-    display: inline-block;
-    padding: 3px 12px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 500;
+    display: inline-block; padding: 3px 12px;
+    border-radius: 20px; font-size: 12px; font-weight: 500;
 }
 .badge-available { background: #E1F5EE; color: #085041; }
 .badge-pending   { background: #FAEEDA; color: #633806; }
@@ -34,19 +32,71 @@ div[data-testid="stProgress"] > div { border-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Chargement des modèles (cached) ─────────────────────────────────────────
-@st.cache_resource(show_spinner='Chargement du modèle Benchmark...')
+# ── Metadata des modèles ──────────────────────────────────────────────────────
+MODEL_INFO = {
+    'Benchmark (OVR LogReg)': {
+        'short': 'Benchmark',   'badge': 'OVR LogReg + TF-IDF',
+        'color': '#888780',     'fill':  'rgba(136,135,128,0.12)',
+        'lang':  'Anglais',     'params': '—',    'latency': '< 10ms',
+        'f1': '—',              'phase': 'Phase 1',
+    },
+    'XLM-R Teacher (EN)': {
+        'short': 'Teacher EN',  'badge': 'XLM-RoBERTa-base',
+        'color': '#534AB7',     'fill':  'rgba(83,74,183,0.15)',
+        'lang':  'Anglais',     'params': '278M', 'latency': '~240ms',
+        'f1': '0.623',          'phase': 'Phase 1',
+    },
+    'XLM-R Teacher* (Darija)': {
+        'short': 'Teacher*',    'badge': 'XLM-R adapté Darija',
+        'color': '#0F6E56',     'fill':  'rgba(15,110,86,0.15)',
+        'lang':  'Darija + AN', 'params': '278M', 'latency': '~240ms',
+        'f1': '0.815',          'phase': 'Phase 2',
+    },
+    'Student DistilBERT (Darija)': {
+        'short': 'Student',     'badge': 'DistilBERT distillé',
+        'color': '#D85A30',     'fill':  'rgba(216,90,48,0.15)',
+        'lang':  'Darija',      'params': '66M',  'latency': '~60ms',
+        'f1': '0.895',          'phase': 'Phase 3',
+    },
+}
+
+PRESETS = {
+    'EN — Toxique': 'You are a complete idiot and I hope something terrible happens to you.',
+    'DA — Toxique': 'nta hmar bzzaf, ghadi ndarb rassek u nkhlik f7ala',
+    'DA — Neutre':  'labas 3lik khoya? kif nta? mzyan lhamdulah',
+    'FR — Neutre':  'Bonjour, comment allez-vous? Bonne journée à tous.',
+}
+
+# ── Chargement des modèles (cached) ──────────────────────────────────────────
+@st.cache_resource(show_spinner='Chargement du Benchmark...')
 def get_benchmark():
     return load_benchmark()
 
-@st.cache_resource(show_spinner='Chargement de XLM-R Teacher...')
+@st.cache_resource(show_spinner='Chargement du Teacher XLM-R...')
 def get_teacher():
     return load_teacher()
 
-benchmark = get_benchmark()
-teacher   = get_teacher()
+@st.cache_resource(show_spinner='Chargement du Teacher* (Darija)...')
+def get_teacher_star():
+    return load_teacher_star()
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner='Chargement du Student DistilBERT...')
+def get_student():
+    return load_student()
+
+benchmark    = get_benchmark()
+teacher      = get_teacher()
+teacher_star = get_teacher_star()
+student      = get_student()
+
+MODELS = {
+    'Benchmark (OVR LogReg)':      benchmark,
+    'XLM-R Teacher (EN)':          teacher,
+    'XLM-R Teacher* (Darija)':     teacher_star,
+    'Student DistilBERT (Darija)': student,
+}
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('## 🛡️ AMANE')
     st.markdown('*Détection de discours toxiques*')
@@ -54,243 +104,310 @@ with st.sidebar:
 
     page = st.radio(
         'Navigation',
-        ['Analyse', 'Batch CSV', 'Comparaison modèles'],
+        ['Analyse', 'Comparaison 4 modèles', 'Batch CSV', 'Pipeline & Métriques'],
         label_visibility='collapsed',
     )
 
     st.divider()
     st.markdown('**Statut des modèles**')
-
-    if benchmark.loaded:
-        st.markdown('<span class="model-badge badge-available">✓ Benchmark</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="model-badge badge-pending">⚠ Benchmark</span>', unsafe_allow_html=True)
-        st.caption(benchmark.error)
-
-    if teacher.loaded:
-        st.markdown('<span class="model-badge badge-available">✓ XLM-R Teacher</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="model-badge badge-pending">⏳ XLM-R Teacher</span>', unsafe_allow_html=True)
-        st.caption('Disponible après entraînement')
+    for key, predictor in MODELS.items():
+        info = MODEL_INFO[key]
+        cls  = 'badge-available' if predictor.loaded else 'badge-pending'
+        icon = '✓' if predictor.loaded else '⏳'
+        st.markdown(
+            f'<span class="model-badge {cls}">{icon} {info["short"]}</span>',
+            unsafe_allow_html=True,
+        )
 
     st.divider()
     st.caption('Projet AMANE — Master 4 IA & Data Science')
 
 
-# ════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # Helpers visuels
-# ════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
-def render_probs(probs: dict, model_name: str):
-    """Affiche les probabilités par label avec barres de progression."""
-    level, level_color = toxicity_level(probs)
-
-    # Niveau global
+def render_probs(probs: dict, threshold: float = 0.5):
+    level, lcolor = toxicity_level(probs)
     st.markdown(
-        f'<div style="margin-bottom:12px;">'
-        f'<span style="font-size:13px;color:#666;">Niveau de toxicité global : </span>'
-        f'<span style="font-size:14px;font-weight:500;color:{level_color};">{level}</span>'
+        f'<div style="margin-bottom:10px;">'
+        f'<span style="font-size:12px;color:#666;">Niveau : </span>'
+        f'<span style="font-size:13px;font-weight:600;color:{lcolor};">{level}</span>'
         f'</div>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
-
-    # Barres par label
     for col in LABEL_COLS:
-        prob  = probs[col]
-        meta  = LABEL_META[col]
-        color = meta['color']
-        label = meta['fr']
-        flag  = '●' if prob > 0.5 else '○'
-
-        col1, col2, col3 = st.columns([3, 6, 1])
-        with col1:
+        prob = probs[col]
+        meta = LABEL_META[col]
+        flag = '●' if prob > threshold else '○'
+        c1, c2, c3 = st.columns([3, 6, 1])
+        with c1:
             st.markdown(
-                f'<span class="label-fr" style="color:{color if prob>0.5 else "inherit"};">'
-                f'{flag} {label}</span>',
-                unsafe_allow_html=True
+                f'<span class="label-fr" style="color:{meta["color"] if prob > threshold else "inherit"};">'
+                f'{flag} {meta["fr"]}</span>',
+                unsafe_allow_html=True,
             )
-        with col2:
+        with c2:
             st.progress(float(prob))
-        with col3:
+        with c3:
             st.markdown(
-                f'<span style="font-size:13px;font-weight:500;">{prob*100:.0f}%</span>',
-                unsafe_allow_html=True
+                f'<span style="font-size:12px;font-weight:500;">{prob*100:.0f}%</span>',
+                unsafe_allow_html=True,
             )
 
 
-def radar_chart(probs_dict: dict) -> go.Figure:
-    """Radar chart pour une prédiction."""
+def radar_single(probs: dict, color: str, fill: str) -> go.Figure:
     labels = [LABEL_META[c]['fr'] for c in LABEL_COLS]
-    values = [probs_dict[c] for c in LABEL_COLS]
-    values += values[:1]
-    labels += labels[:1]
-
+    v = [probs[c] for c in LABEL_COLS] + [probs[LABEL_COLS[0]]]
+    l = labels + [labels[0]]
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(
-        r=values, theta=labels,
-        fill='toself',
-        line=dict(color='#534AB7', width=2),
-        fillcolor='rgba(83,74,183,0.15)',
-        name='Probabilités',
+        r=v, theta=l, fill='toself',
+        line=dict(color=color, width=2),
+        fillcolor=fill,
     ))
     fig.update_layout(
         polar=dict(radialaxis=dict(visible=True, range=[0, 1], tickfont=dict(size=10))),
         showlegend=False,
-        margin=dict(l=40, r=40, t=30, b=30),
-        height=300,
+        margin=dict(l=40, r=40, t=20, b=20),
+        height=280,
     )
     return fig
 
 
-def comparison_radar(probs_bench: dict, probs_teacher: dict) -> go.Figure:
-    """Radar chart comparatif deux modèles."""
+def multi_radar(results: dict) -> go.Figure:
     labels = [LABEL_META[c]['fr'] for c in LABEL_COLS]
-    v_b    = [probs_bench[c]   for c in LABEL_COLS] + [probs_bench[LABEL_COLS[0]]]
-    v_t    = [probs_teacher[c] for c in LABEL_COLS] + [probs_teacher[LABEL_COLS[0]]]
     l      = labels + [labels[0]]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(
-        r=v_b, theta=l, fill='toself', name='Benchmark',
-        line=dict(color='#888780', width=2),
-        fillcolor='rgba(136,135,128,0.10)',
-    ))
-    fig.add_trace(go.Scatterpolar(
-        r=v_t, theta=l, fill='toself', name='XLM-R Teacher',
-        line=dict(color='#534AB7', width=2),
-        fillcolor='rgba(83,74,183,0.15)',
-    ))
+    fig    = go.Figure()
+    for key, probs in results.items():
+        info = MODEL_INFO[key]
+        v    = [probs[c] for c in LABEL_COLS] + [probs[LABEL_COLS[0]]]
+        fig.add_trace(go.Scatterpolar(
+            r=v, theta=l, fill='toself',
+            name=info['short'],
+            line=dict(color=info['color'], width=2),
+            fillcolor=info['fill'],
+        ))
     fig.update_layout(
         polar=dict(radialaxis=dict(visible=True, range=[0, 1], tickfont=dict(size=10))),
         showlegend=True,
-        legend=dict(x=1.1, y=1.0),
-        margin=dict(l=40, r=80, t=30, b=30),
-        height=320,
+        legend=dict(x=1.05, y=1.0),
+        margin=dict(l=40, r=110, t=30, b=30),
+        height=400,
     )
     return fig
 
 
-# ════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGE 1 — Analyse commentaire unique
-# ════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 if page == 'Analyse':
     st.title('Analyse de commentaire')
     st.caption('Entrez un commentaire pour détecter la toxicité avec le modèle sélectionné.')
 
-    # Sélecteur de modèle
-    model_options = ['Benchmark (OVR LogReg)']
-    if teacher.loaded:
-        model_options.append('XLM-R Teacher')
-
+    model_options  = [k for k, p in MODELS.items() if p.loaded]
     selected_model = st.selectbox('Modèle', model_options)
+    info           = MODEL_INFO[selected_model]
 
-    if not teacher.loaded and len(model_options) == 1:
-        st.info(
-            '⏳ **XLM-R Teacher** sera disponible après l\'entraînement. '
-            'On exécute `AMANE_Teacher.ipynb` puis on place les fichiers dans `models/teacher/`.',
-            icon='ℹ️'
-        )
+    st.markdown(
+        f'<span class="model-badge badge-available">{info["badge"]}</span>'
+        f'<span style="font-size:12px;color:#666;margin-left:10px;">'
+        f'Langue : <b>{info["lang"]}</b> &nbsp;·&nbsp; Params : <b>{info["params"]}</b>'
+        f' &nbsp;·&nbsp; Latence : <b>{info["latency"]}</b>'
+        f' &nbsp;·&nbsp; Macro F1 : <b>{info["f1"]}</b></span>',
+        unsafe_allow_html=True,
+    )
+    st.write('')
 
-    # Zone de saisie
-    default_text = 'You are a complete idiot and I hope something terrible happens to you.'
     comment = st.text_area(
         'Commentaire à analyser',
-        value=default_text,
-        height=120,
-        placeholder='Entrez un commentaire en anglais ou en Darija...',
+        value='You are a complete idiot and I hope something terrible happens to you.',
+        height=110,
+        placeholder='Anglais, français ou Darija...',
     )
 
     col_btn, col_clear = st.columns([1, 5])
     with col_btn:
         analyze = st.button('Analyser', type='primary', use_container_width=True)
     with col_clear:
-        clear = st.button('Effacer', use_container_width=False)
+        clear = st.button('Effacer')
     if clear:
         comment = ''
 
     if analyze and comment.strip():
         with st.spinner('Analyse en cours...'):
             try:
-                if selected_model == 'Benchmark (OVR LogReg)':
-                    probs = benchmark.predict(comment)
-                else:
-                    probs = teacher.predict(comment)
-
+                probs = MODELS[selected_model].predict(comment)
                 st.divider()
                 col_left, col_right = st.columns([3, 2])
-
                 with col_left:
                     st.subheader('Résultats par label')
-                    render_probs(probs, selected_model)
-
+                    render_probs(probs)
                 with col_right:
                     st.subheader('Radar')
-                    st.plotly_chart(radar_chart(probs), use_container_width=True)
-
-                # Détails JSON (expandable)
-                with st.expander('Voir les probabilités brutes'):
+                    st.plotly_chart(
+                        radar_single(probs, info['color'], info['fill']),
+                        use_container_width=True,
+                    )
+                with st.expander('Probabilités brutes (JSON)'):
                     st.json({col: f'{v*100:.2f}%' for col, v in probs.items()})
-
             except Exception as e:
                 st.error(f'Erreur : {e}')
-
-    elif analyze and not comment.strip():
+    elif analyze:
         st.warning('Veuillez entrer un commentaire.')
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# PAGE 2 — Analyse Batch CSV
-# ════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 2 — Comparaison 4 modèles
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == 'Comparaison 4 modèles':
+    st.title('Comparaison des 4 modèles AMANE')
+    st.caption(
+        "Testez un commentaire sur tous les modèles simultanément et visualisez "
+        "l'évolution progressive des performances."
+    )
+
+    # Preset buttons
+    if 'cmp_text' not in st.session_state:
+        st.session_state['cmp_text'] = PRESETS['EN — Toxique']
+
+    st.markdown('**Exemples rapides :**')
+    preset_cols = st.columns(len(PRESETS))
+    for i, (label, text) in enumerate(PRESETS.items()):
+        with preset_cols[i]:
+            if st.button(label, use_container_width=True, key=f'preset_{i}'):
+                st.session_state['cmp_text'] = text
+                st.rerun()
+
+    comment = st.text_area('Commentaire à analyser', key='cmp_text', height=90)
+    run     = st.button('Analyser avec les 4 modèles', type='primary')
+
+    if run and comment.strip():
+        with st.spinner('Analyse en cours...'):
+            results = {}
+            for key, predictor in MODELS.items():
+                if predictor.loaded:
+                    try:
+                        results[key] = predictor.predict(comment)
+                    except Exception as e:
+                        st.warning(f'{MODEL_INFO[key]["short"]} — erreur : {e}')
+
+        if not results:
+            st.error('Aucun modèle disponible.')
+        else:
+            st.divider()
+
+            # ── Metric cards ─────────────────────────────────────────────
+            metric_cols = st.columns(len(results))
+            for i, (key, probs) in enumerate(results.items()):
+                info          = MODEL_INFO[key]
+                level, lcolor = toxicity_level(probs)
+                top_prob      = max(probs.values())
+                top_label     = LABEL_META[max(probs, key=probs.get)]['fr']
+                with metric_cols[i]:
+                    st.markdown(
+                        f'<div style="border-left:4px solid {info["color"]};padding-left:10px;">'
+                        f'<div style="font-weight:600;font-size:14px;">{info["short"]}</div>'
+                        f'<div style="font-size:11px;color:#666;">'
+                        f'{info["phase"]} &nbsp;·&nbsp; {info["params"]} params</div>'
+                        f'<div style="font-size:20px;font-weight:700;color:{lcolor};margin-top:6px;">'
+                        f'{level}</div>'
+                        f'<div style="font-size:12px;color:#666;">'
+                        f'Max : {top_prob*100:.0f}% ({top_label})</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            st.write('')
+
+            # ── Prob bars — grille 2×2 ────────────────────────────────────
+            keys = list(results.keys())
+            for row_keys in [keys[:2], keys[2:]]:
+                if not row_keys:
+                    continue
+                cols = st.columns(len(row_keys))
+                for col_widget, key in zip(cols, row_keys):
+                    info = MODEL_INFO[key]
+                    with col_widget:
+                        st.markdown(
+                            f'<div style="font-size:13px;font-weight:600;color:{info["color"]};'
+                            f'border-bottom:2px solid {info["color"]};padding-bottom:4px;'
+                            f'margin-bottom:10px;">'
+                            f'{info["short"]} — {info["badge"]}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        render_probs(results[key])
+                st.write('')
+
+            # ── Radar multi-modèles ───────────────────────────────────────
+            st.divider()
+            st.subheader('Radar comparatif')
+            st.plotly_chart(multi_radar(results), use_container_width=True)
+
+            # ── Tableau delta vs Benchmark ────────────────────────────────
+            bench_key = 'Benchmark (OVR LogReg)'
+            if bench_key in results:
+                st.subheader('Delta vs Benchmark')
+                bench      = results[bench_key]
+                other_keys = [k for k in results if k != bench_key]
+                rows = []
+                for col in LABEL_COLS:
+                    row = {'Label': LABEL_META[col]['fr'], 'Benchmark': f"{bench[col]*100:.1f}%"}
+                    for key in other_keys:
+                        d     = results[key][col] - bench[col]
+                        arrow = '↑' if d > 0.03 else ('↓' if d < -0.03 else '≈')
+                        row[MODEL_INFO[key]['short']] = (
+                            f"{results[key][col]*100:.1f}% ({d*100:+.1f}% {arrow})"
+                        )
+                    rows.append(row)
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    elif run:
+        st.warning('Veuillez entrer un commentaire.')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 3 — Batch CSV
+# ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Batch CSV':
     st.title('Analyse en lot — CSV')
     st.caption(
         'Uploadez un fichier CSV avec une colonne `comment_text`. '
-        'Le système analysera chaque ligne et vous renverra un CSV annoté.'
+        'Le système analysera chaque ligne et renverra un CSV annoté.'
     )
 
-    # Format attendu
     with st.expander('Format du CSV attendu'):
         st.markdown('Le fichier doit contenir **au minimum** une colonne `comment_text` :')
         st.dataframe(pd.DataFrame({
             'comment_text': [
                 'You are an idiot',
                 'Have a great day!',
-                'I will find you and hurt you',
+                'nta hmar bzzaf',
             ]
         }), use_container_width=True)
 
-    # Sélecteur modèle
-    batch_model_options = ['Benchmark (OVR LogReg)']
-    if teacher.loaded:
-        batch_model_options.append('XLM-R Teacher')
-    batch_model = st.selectbox('Modèle pour le batch', batch_model_options, key='batch_model')
+    batch_options = [k for k, p in MODELS.items() if p.loaded]
+    batch_model   = st.selectbox('Modèle pour le batch', batch_options, key='batch_model')
 
-    # Upload
     uploaded = st.file_uploader('Choisir un fichier CSV', type=['csv'])
 
     if uploaded:
         df_input = pd.read_csv(uploaded)
-
         if 'comment_text' not in df_input.columns:
-            st.error('❌ La colonne `comment_text` est manquante dans le fichier.')
+            st.error('La colonne `comment_text` est manquante dans le fichier.')
         else:
-            st.success(f'✅ Fichier chargé — {len(df_input):,} commentaires')
+            st.success(f'Fichier chargé — {len(df_input):,} commentaires')
             st.dataframe(df_input.head(5), use_container_width=True)
 
-            if st.button('Lancer l\'analyse', type='primary'):
+            if st.button("Lancer l'analyse", type='primary'):
                 progress_bar = st.progress(0, text='Analyse en cours...')
                 texts = df_input['comment_text'].fillna('').tolist()
                 n     = len(texts)
 
                 try:
-                    # Prédictions batch
-                    if batch_model == 'Benchmark (OVR LogReg)':
-                        all_probs = benchmark.predict_batch(texts)
-                    else:
-                        all_probs = teacher.predict_batch(texts)
+                    all_probs = MODELS[batch_model].predict_batch(texts)
                     progress_bar.progress(80, text='Assemblage des résultats...')
 
-                    # Construire le DataFrame résultat
                     df_result = df_input.copy()
                     for col in LABEL_COLS:
                         df_result[f'prob_{col}'] = [p[col] for p in all_probs]
@@ -302,179 +419,228 @@ elif page == 'Batch CSV':
                     st.divider()
                     st.subheader('Résultats')
 
-                    # Statistiques rapides
                     m1, m2, m3, m4 = st.columns(4)
-                    n_toxic = sum(1 for p in all_probs if p['toxic'] > 0.5)
-                    n_threat= sum(1 for p in all_probs if p['threat'] > 0.5)
-                    n_hate  = sum(1 for p in all_probs if p['identity_hate'] > 0.5)
-                    avg_tox = np.mean([p['toxic'] for p in all_probs])
-
-                    m1.metric('Total analysés', f'{n:,}')
-                    m2.metric('Toxiques détectés', f'{n_toxic:,}', f'{n_toxic/n*100:.1f}%')
+                    n_toxic  = sum(1 for p in all_probs if p['toxic'] > 0.5)
+                    n_threat = sum(1 for p in all_probs if p['threat'] > 0.5)
+                    n_hate   = sum(1 for p in all_probs if p['identity_hate'] > 0.5)
+                    m1.metric('Total analysés',    f'{n:,}')
+                    m2.metric('Toxiques détectés', f'{n_toxic:,}',  f'{n_toxic/n*100:.1f}%')
                     m3.metric('Menaces détectées', f'{n_threat:,}')
                     m4.metric('Haine identitaire', f'{n_hate:,}')
 
-                    # Tableau
-                    prob_cols = [f'prob_{c}' for c in LABEL_COLS]
+                    prob_cols  = [f'prob_{c}' for c in LABEL_COLS]
                     display_df = df_result[['comment_text', 'toxicity_level'] + prob_cols].copy()
                     for c in prob_cols:
                         display_df[c] = display_df[c].apply(lambda x: f'{x*100:.1f}%')
-
                     st.dataframe(display_df, use_container_width=True, height=350)
 
-                    # Distribution des niveaux
                     level_counts = df_result['toxicity_level'].value_counts()
                     fig_bar = go.Figure(go.Bar(
                         x=level_counts.index,
                         y=level_counts.values,
-                        marker_color=['#A32D2D','#D85A30','#EF9F27','#854F0B','#0F6E56'],
+                        marker_color=['#A32D2D', '#D85A30', '#EF9F27', '#854F0B', '#0F6E56'],
                     ))
                     fig_bar.update_layout(
                         title='Distribution des niveaux de toxicité',
-                        xaxis_title='Niveau', yaxis_title='Nombre de commentaires',
-                        height=300, margin=dict(l=40, r=20, t=40, b=40),
+                        xaxis_title='Niveau', yaxis_title='Commentaires',
+                        height=280, margin=dict(l=40, r=20, t=40, b=40),
                     )
                     st.plotly_chart(fig_bar, use_container_width=True)
 
-                    # Téléchargement
                     csv_bytes = df_result.to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label='⬇️ Télécharger les résultats (CSV)',
+                        '⬇️ Télécharger les résultats (CSV)',
                         data=csv_bytes,
                         file_name='amane_resultats.csv',
                         mime='text/csv',
                         type='primary',
                     )
-
                 except Exception as e:
-                    st.error(f'Erreur durant l\'analyse : {e}')
+                    st.error(f"Erreur durant l'analyse : {e}")
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# PAGE 3 — Comparaison des modèles
-# ════════════════════════════════════════════════════════════════════════════
-elif page == 'Comparaison modèles':
-    st.title('Comparaison Benchmark vs XLM-R Teacher')
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 4 — Pipeline & Métriques
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == 'Pipeline & Métriques':
+    st.title('Pipeline AMANE — Évolution des modèles')
+    st.caption('Architecture Knowledge Distillation en 3 phases pour la Darija.')
 
-    if not teacher.loaded:
-        st.warning(
-            '⏳ **XLM-R Teacher non disponible.** '
-            'Cette page sera pleinement fonctionnelle après l\'entraînement du Teacher. '
-            'Pour l\'instant, tu peux voir la structure de la comparaison avec le Benchmark seul.',
-            icon='⚠️'
+    tab_roadmap, tab_curves, tab_archi = st.tabs([
+        'Feuille de route', "Courbes d'entraînement", 'Architecture',
+    ])
+
+    # ── Tab 1 : Feuille de route ───────────────────────────────────────────
+    with tab_roadmap:
+        roadmap = {
+            'Phase':          ['Phase 1', 'Phase 1', 'Phase 2', 'Phase 3'],
+            'Modèle':         [
+                'Benchmark (OVR LogReg)',
+                'XLM-R Teacher',
+                'XLM-R Teacher* (adapté Darija)',
+                'Student DistilBERT (Darija)',
+            ],
+            'Langue':         ['Anglais', 'Anglais', 'Anglais + Darija', 'Darija'],
+            'Macro F1 (val)': ['—', '0.623', '0.815', '0.895'],
+            'Paramètres':     ['—', '278M', '278M', '66M'],
+            'Latence CPU':    ['< 10ms', '~240ms', '~240ms', '~60ms'],
+            'Compression':    ['—', '1×', '1×', '4.2×'],
+            'Statut':         ['Déployé', 'Déployé', 'Déployé', 'Déployé'],
+        }
+        df_roadmap = pd.DataFrame(roadmap)
+
+        def color_statut(val):
+            if val == 'Déployé':
+                return 'background-color:#E1F5EE;color:#085041;font-weight:500'
+            return 'background-color:#F0F0F0;color:#666'
+
+        st.dataframe(
+            df_roadmap.style.map(color_statut, subset=['Statut']),
+            use_container_width=True, hide_index=True,
         )
 
-    # Zone de saisie partagée
-    comment = st.text_area(
-        'Commentaire à comparer',
-        value='You stupid idiot, I will destroy you.',
-        height=100,
-    )
+        st.write('')
+        st.markdown('**Progression Macro F1 — Darija toxic detection**')
+        f1_labels  = ['Benchmark\n(N/A)', 'Teacher EN\n(proxy)', 'Teacher*\n(Darija)', 'Student\n(Darija)']
+        f1_values  = [0.0, 0.183, 0.815, 0.895]
+        f1_colors  = ['#888780', '#534AB7', '#0F6E56', '#D85A30']
+        f1_texts   = ['N/A', '0.183', '0.815', '0.895']
+        fig_f1 = go.Figure(go.Bar(
+            x=f1_labels, y=f1_values,
+            marker_color=f1_colors,
+            text=f1_texts, textposition='outside',
+        ))
+        fig_f1.update_layout(
+            yaxis=dict(range=[0, 1.05], title='Score'),
+            height=320, margin=dict(l=40, r=20, t=20, b=40),
+        )
+        st.plotly_chart(fig_f1, use_container_width=True)
 
-    if st.button('Comparer', type='primary'):
-        if not comment.strip():
-            st.warning('Veuillez entrer un commentaire.')
+    # ── Tab 2 : Courbes d'entraînement ────────────────────────────────────
+    with tab_curves:
+        history_paths = {
+            'XLM-R Teacher (EN)':          'models/teacher/training_history.json',
+            'XLM-R Teacher* (Darija)':     'models/teacher_star/training_history_star.json',
+            'Student DistilBERT (Darija)': 'models/student/training_history_student.json',
+        }
+        histories = {}
+        for key, path in history_paths.items():
+            try:
+                with open(path) as fh:
+                    histories[key] = json.load(fh)
+            except Exception:
+                pass
+
+        if not histories:
+            st.info("Historiques d'entraînement non disponibles localement.")
         else:
-            with st.spinner('Analyse comparative...'):
-                probs_bench = benchmark.predict(comment) if benchmark.loaded else None
-                probs_teacher_res = teacher.predict(comment) if teacher.loaded else None
+            for key, history in histories.items():
+                info   = MODEL_INFO[key]
+                epochs = [h['epoch'] for h in history]
 
-            st.divider()
-
-            col_b, col_t = st.columns(2)
-
-            # ── Colonne Benchmark ──────────────────────────────────────────
-            with col_b:
-                st.markdown('### Benchmark')
                 st.markdown(
-                    '<span class="model-badge badge-available">OVR LogReg + TF-IDF</span>',
-                    unsafe_allow_html=True
-                )
-                st.write('')
-                if probs_bench:
-                    render_probs(probs_bench, 'Benchmark')
-                else:
-                    st.error('Benchmark non chargé.')
-
-            # ── Colonne Teacher ────────────────────────────────────────────
-            with col_t:
-                st.markdown('### XLM-R Teacher')
-                if teacher.loaded:
-                    st.markdown(
-                        '<span class="model-badge badge-available">XLM-RoBERTa fine-tuné</span>',
-                        unsafe_allow_html=True
-                    )
-                    st.write('')
-                    render_probs(probs_teacher_res, 'Teacher')
-                else:
-                    st.markdown(
-                        '<span class="model-badge badge-pending">⏳ Non entraîné</span>',
-                        unsafe_allow_html=True
-                    )
-                    st.info(
-                        'Place les fichiers du Teacher dans `models/teacher/` '
-                        'après avoir exécuté `AMANE_Teacher.ipynb`.'
-                    )
-                    # Placeholder visuel
-                    st.write('')
-                    for col in LABEL_COLS:
-                        meta = LABEL_META[col]
-                        c1, c2, c3 = st.columns([3, 6, 1])
-                        with c1:
-                            st.markdown(
-                                f'<span class="label-fr" style="color:#ccc;">○ {meta["fr"]}</span>',
-                                unsafe_allow_html=True
-                            )
-                        with c2:
-                            st.progress(0.0)
-                        with c3:
-                            st.markdown('<span style="font-size:13px;color:#ccc;">—</span>', unsafe_allow_html=True)
-
-            # ── Radar comparatif ───────────────────────────────────────────
-            if probs_bench and probs_teacher_res:
-                st.divider()
-                st.subheader('Radar comparatif')
-                st.plotly_chart(
-                    comparison_radar(probs_bench, probs_teacher_res),
-                    use_container_width=True
+                    f'<div style="font-weight:600;font-size:15px;color:{info["color"]};'
+                    f'border-left:4px solid {info["color"]};padding-left:8px;'
+                    f'margin:20px 0 8px;">{info["short"]} — {info["phase"]}</div>',
+                    unsafe_allow_html=True,
                 )
 
-                # Tableau des différences
-                st.subheader('Différences par label')
-                diff_rows = []
-                for col in LABEL_COLS:
-                    b = probs_bench[col]
-                    t = probs_teacher_res[col]
-                    d = t - b
-                    diff_rows.append({
-                        'Label'        : LABEL_META[col]['fr'],
-                        'Benchmark'    : f'{b*100:.1f}%',
-                        'XLM-R Teacher': f'{t*100:.1f}%',
-                        'Différence'   : f'{d*100:+.1f}%',
-                        'Avantage'     : 'XLM-R ↑' if d > 0.05 else ('Benchmark ↑' if d < -0.05 else '≈ Égal'),
-                    })
-                st.dataframe(pd.DataFrame(diff_rows), use_container_width=True, hide_index=True)
+                fig = make_subplots(
+                    rows=1, cols=2,
+                    subplot_titles=('Loss (train / val)', 'Métriques val'),
+                )
+                fig.add_trace(go.Scatter(
+                    x=epochs, y=[h['train_loss'] for h in history],
+                    name='Train loss', mode='lines+markers',
+                    line=dict(color=info['color'], width=2),
+                    marker=dict(size=6),
+                ), row=1, col=1)
+                fig.add_trace(go.Scatter(
+                    x=epochs, y=[h['val_loss'] for h in history],
+                    name='Val loss', mode='lines+markers',
+                    line=dict(color=info['color'], width=2, dash='dot'),
+                    marker=dict(size=6),
+                ), row=1, col=1)
 
-            elif probs_bench and not probs_teacher_res:
-                st.divider()
-                st.subheader('Radar — Benchmark uniquement')
-                st.plotly_chart(radar_chart(probs_bench), use_container_width=True)
+                f1_key  = 'val_f1'  if 'val_f1'  in history[0] else 'macro_f1'
+                auc_key = 'val_auc' if 'val_auc' in history[0] else None
 
-    # ── Métriques statiques de performance (depuis les notebooks) ──────────
-    st.divider()
-    st.subheader('Performances sur le set de validation Jigsaw')
-    st.caption('Remplir après exécution des deux notebooks.')
+                if f1_key in history[0]:
+                    fig.add_trace(go.Scatter(
+                        x=epochs, y=[h[f1_key] for h in history],
+                        name='F1 val', mode='lines+markers',
+                        line=dict(color=info['color'], width=2),
+                        marker=dict(size=6),
+                    ), row=1, col=2)
 
-    perf_data = {
-        'Modèle'        : ['Benchmark (baseline)', 'Benchmark (balanced)', 'XLM-R Teacher'],
-        'Macro F1'      : ['—', '—', '⏳'],
-        'Micro F1'      : ['—', '—', '⏳'],
-        'Hamming Loss'  : ['—', '—', '⏳'],
-        'Temps entraîn.': ['< 5 min', '< 5 min', '~2-3h GPU'],
-        'Complexité'    : ['Faible', 'Faible', 'Élevée'],
-    }
-    st.dataframe(pd.DataFrame(perf_data), use_container_width=True, hide_index=True)
-    st.caption(
-        'Remplace les "—" et "⏳" en modifiant le dict `perf_data` dans `app.py` '
-        'une fois les notebooks exécutés.'
-    )
+                if auc_key and auc_key in history[0]:
+                    fig.add_trace(go.Scatter(
+                        x=epochs, y=[h[auc_key] for h in history],
+                        name='AUC val', mode='lines+markers',
+                        line=dict(color=info['color'], width=2, dash='dot'),
+                        marker=dict(size=6),
+                    ), row=1, col=2)
+
+                fig.update_xaxes(title_text='Époque', tickmode='linear', dtick=1)
+                fig.update_layout(
+                    height=260,
+                    margin=dict(l=40, r=20, t=40, b=30),
+                    showlegend=True,
+                    legend=dict(x=1.02, y=1.0),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+    # ── Tab 3 : Architecture ──────────────────────────────────────────────
+    with tab_archi:
+        st.markdown("""
+### Pipeline Knowledge Distillation — AMANE
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  PHASE 1 — Jigsaw EN                                             │
+│  Jigsaw Dataset (EN, 159k) ──► XLM-R Teacher ──► 6 labels       │
+│  BCEWithLogitsLoss + pos_weight   278M params     F1 = 0.623     │
+└─────────────────────────────────────┬────────────────────────────┘
+                                      │ teacher_best.pt
+                                      ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  PHASE 2 — Adaptation domaine Darija (DarLoad)                   │
+│  Teacher gelé + DarLoad ──► Masked Loss ──► Teacher* (Darija)    │
+│  binary toxic/non-toxic      col 0 seulement   F1  = 0.815       │
+│  2 epochs, LR = 1e-5         5 labels gelés    AUC = 0.914       │
+└─────────────────────────────────────┬────────────────────────────┘
+                                      │ pseudo-labels Teacher* → DarLoad
+                                      ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  PHASE 3 — Distillation Student                                   │
+│  Soft labels Teacher* ──► Hybrid Loss ──► Student DistilBERT     │
+│  DarLoad (conf ≥ 0.3)       α=0.3 hard        66M params         │
+│  4 epochs                   (1-α)=0.7 soft    F1  = 0.895        │
+│                                                4× plus rapide    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Hybrid Loss — Phase 3
+
+| Composante | Poids | Description |
+|---|---|---|
+| BCE Hard | α = 0.30 | Supervision label `toxic` DarLoad ground-truth |
+| BCE Soft | 1-α = 0.70 | Distillation sur 6 soft labels du Teacher* |
+| **Total** | **1.0** | `L = 0.3 × BCE_hard + 0.7 × BCE_soft` |
+
+### Architectures comparées
+
+| Modèle | Backbone | Pooling | Layers | Hidden | Tokenizer |
+|---|---|---|---|---|---|
+| Teacher / Teacher* | XLM-RoBERTa-base | Mean pooling | 12 | 768 | SentencePiece 250k |
+| Student | DistilBERT-multilingual | CLS token | 6 | 768 | WordPiece 119k |
+| Benchmark | TF-IDF + LogReg OVR | — | — | 10k features | — |
+
+### Datasets
+
+| Dataset | Taille | Labels | Usage |
+|---|---|---|---|
+| Jigsaw Toxic Comments | 159k EN | 6 labels multi | Teacher train |
+| DarLoad | ~10k DA | binary toxic | Teacher* fine-tune + pseudo-labels |
+| Pseudo-labels DarLoad | ~8k DA (conf ≥ 0.3) | 6 soft labels | Student train |
+""")
