@@ -1,4 +1,5 @@
 import json
+import re
 import requests
 import streamlit as st
 import pandas as pd
@@ -137,7 +138,7 @@ with st.sidebar:
 
     page = st.radio(
         'Navigation',
-        ['Analyse', 'Comparaison 4 modèles', 'Batch CSV', 'Pipeline & Métriques'],
+        ['Analyse', 'Comparaison 4 modèles', 'Batch CSV', 'YouTube Analyse', 'Pipeline & Métriques'],
         label_visibility='collapsed',
     )
 
@@ -231,6 +232,50 @@ def multi_radar(results: dict) -> go.Figure:
         height=400,
     )
     return fig
+
+
+# ── YouTube helpers ───────────────────────────────────────────────────────────
+_YT_ID_RE = re.compile(
+    r'(?:v=|youtu\.be/|embed/|shorts/)([A-Za-z0-9_-]{11})'
+)
+
+def extract_video_id(url: str) -> str | None:
+    m = _YT_ID_RE.search(url)
+    return m.group(1) if m else (url.strip() if len(url.strip()) == 11 else None)
+
+
+def fetch_youtube_comments(api_key: str, video_id: str, max_comments: int) -> list[str]:
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+
+    youtube  = build('youtube', 'v3', developerKey=api_key)
+    comments = []
+    next_page = None
+
+    while len(comments) < max_comments:
+        try:
+            resp = youtube.commentThreads().list(
+                videoId=video_id,
+                part='snippet',
+                maxResults=min(100, max_comments - len(comments)),
+                textFormat='plainText',
+                pageToken=next_page,
+            ).execute()
+        except HttpError as e:
+            if e.resp.status == 403:
+                raise RuntimeError('Commentaires désactivés pour cette vidéo.')
+            raise RuntimeError(f'Erreur API YouTube : {e}')
+
+        for item in resp.get('items', []):
+            text = item['snippet']['topLevelComment']['snippet'].get('textDisplay', '')
+            if text.strip():
+                comments.append(text.strip())
+
+        next_page = resp.get('nextPageToken')
+        if not next_page:
+            break
+
+    return comments
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -495,7 +540,116 @@ elif page == 'Batch CSV':
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE 4 — Pipeline & Métriques
+# PAGE 4 — YouTube Analyse
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == 'YouTube Analyse':
+    st.title('Analyse YouTube')
+    st.caption(
+        'Collez l\'URL d\'une vidéo YouTube pour extraire ses commentaires '
+        'et analyser leur toxicité avec un modèle AMANE.'
+    )
+
+    col_url, col_key = st.columns([3, 2])
+    with col_url:
+        yt_url = st.text_input(
+            'URL ou ID de la vidéo',
+            placeholder='https://www.youtube.com/watch?v=...',
+        )
+    with col_key:
+        yt_key = st.text_input(
+            'Clé API YouTube Data v3',
+            type='password',
+            placeholder='AIza...',
+        )
+
+    col_max, col_model, col_btn = st.columns([2, 3, 1])
+    with col_max:
+        max_comments = st.slider('Max commentaires', 20, 500, 100, step=10)
+    with col_model:
+        yt_model_options = [k for k, p in MODELS.items() if p.loaded]
+        yt_model = st.selectbox('Modèle', yt_model_options, key='yt_model')
+    with col_btn:
+        st.write('')
+        st.write('')
+        fetch_btn = st.button('Analyser', type='primary', use_container_width=True)
+
+    if fetch_btn:
+        if not yt_url.strip():
+            st.warning('Veuillez entrer une URL YouTube.')
+        elif not yt_key.strip():
+            st.warning('Veuillez entrer votre clé API YouTube.')
+        else:
+            video_id = extract_video_id(yt_url.strip())
+            if not video_id:
+                st.error('URL non reconnue. Collez un lien YouTube valide ou un ID à 11 caractères.')
+            else:
+                with st.spinner(f'Récupération des commentaires (max {max_comments})...'):
+                    try:
+                        raw_comments = fetch_youtube_comments(yt_key.strip(), video_id, max_comments)
+                    except RuntimeError as e:
+                        st.error(str(e))
+                        raw_comments = []
+
+                if raw_comments:
+                    st.success(f'{len(raw_comments)} commentaires récupérés.')
+
+                    with st.spinner('Analyse de toxicité en cours...'):
+                        try:
+                            all_probs = MODELS[yt_model].predict_batch(raw_comments)
+                        except Exception as e:
+                            st.error(f"Erreur durant l'analyse : {e}")
+                            all_probs = []
+
+                    if all_probs:
+                        df_yt = pd.DataFrame({'comment_text': raw_comments})
+                        for col in LABEL_COLS:
+                            df_yt[f'prob_{col}'] = [p[col] for p in all_probs]
+                        df_yt['toxicity_level'] = [toxicity_level(p)[0] for p in all_probs]
+
+                        st.divider()
+                        n = len(df_yt)
+                        n_toxic  = sum(1 for p in all_probs if p['toxic']         > 0.5)
+                        n_threat = sum(1 for p in all_probs if p['threat']        > 0.5)
+                        n_hate   = sum(1 for p in all_probs if p['identity_hate'] > 0.5)
+                        m1, m2, m3, m4 = st.columns(4)
+                        m1.metric('Commentaires analysés', f'{n:,}')
+                        m2.metric('Toxiques détectés',     f'{n_toxic:,}',  f'{n_toxic/n*100:.1f}%')
+                        m3.metric('Menaces',               f'{n_threat:,}')
+                        m4.metric('Haine identitaire',     f'{n_hate:,}')
+
+                        level_counts = df_yt['toxicity_level'].value_counts()
+                        fig_yt = go.Figure(go.Bar(
+                            x=level_counts.index,
+                            y=level_counts.values,
+                            marker_color=['#A32D2D', '#D85A30', '#EF9F27', '#854F0B', '#0F6E56'],
+                        ))
+                        fig_yt.update_layout(
+                            title='Distribution des niveaux de toxicité',
+                            xaxis_title='Niveau', yaxis_title='Commentaires',
+                            height=280, margin=dict(l=40, r=20, t=40, b=40),
+                        )
+                        st.plotly_chart(fig_yt, use_container_width=True)
+
+                        prob_cols  = [f'prob_{c}' for c in LABEL_COLS]
+                        display_df = df_yt[['comment_text', 'toxicity_level'] + prob_cols].copy()
+                        for c in prob_cols:
+                            display_df[c] = display_df[c].apply(lambda x: f'{x*100:.1f}%')
+                        st.dataframe(display_df, use_container_width=True, height=380)
+
+                        csv_bytes = df_yt.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            '⬇️ Télécharger les résultats (CSV)',
+                            data=csv_bytes,
+                            file_name=f'amane_youtube_{video_id}.csv',
+                            mime='text/csv',
+                            type='primary',
+                        )
+                elif not raw_comments and fetch_btn:
+                    st.info('Aucun commentaire récupéré pour cette vidéo.')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 5 — Pipeline & Métriques
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Pipeline & Métriques':
     st.title('Pipeline AMANE — Évolution des modèles')
