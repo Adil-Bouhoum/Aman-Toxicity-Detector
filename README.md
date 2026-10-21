@@ -7,7 +7,7 @@ Cross-lingual knowledge distillation: an English multi-label toxicity teacher (X
 ## Demo
 
 - **Public inference API (live):** https://bhm03-amane-api.hf.space (FastAPI + Docker on Hugging Face Spaces). Interactive docs at [`/docs`](https://bhm03-amane-api.hf.space/docs).
-- **Streamlit dashboard:** `[STREAMLIT_APP_URL]` <!-- TODO: add the confirmed Streamlit Cloud URL, or remove this line -->
+<!-- TODO: add the confirmed Streamlit Cloud URL, or remove this line -->
 
 <!-- TODO: add screenshot of the "Analyse" page (Darija toxic preset, with per-label probability bars) -->
 <!-- TODO: add screenshot of the "Comparaison 4 modèles" page -->
@@ -154,4 +154,4 @@ EMSI 4th-year AI & Data Science project (May 2026), team of 4, supervised by **D
 
 ## Author
 
-**Adil Bouhoum**: [Portfolio]([PORTFOLIO_URL]) · [LinkedIn]([LINKEDIN_URL]) · [GitHub](https://github.com/Adil-Bouhoum)
+**Adil Bouhoum**: [LinkedIn](https://www.linkedin.com/in/adil-bouhoum-b83129232) · [GitHub](https://github.com/Adil-Bouhoum)
